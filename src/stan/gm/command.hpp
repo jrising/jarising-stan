@@ -571,7 +571,7 @@ namespace stan {
       write_comment(sample_stream);
 
         
-        clock_t start = clock(); 
+        clock_t start = clock();
         if (cov_file != ""){
             stan::mcmc::nuts_massgiven<rng_t> nuts_massgiven_sampler(model,
                                                                      cov_file,

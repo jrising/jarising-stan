@@ -44,7 +44,7 @@ namespace stan {
       // Depth of last sample taken (-1 before any samples)
       int _lastdepth;
       
-      //int _drop_warm;
+      int _drop_warm;
 
       // Yuanjun : now we use a matrix to get the covariance matrix
       Eigen::MatrixXd _cov_mat;
@@ -53,14 +53,11 @@ namespace stan {
       // Running statistics to estimate per-coordinate std. deviations.
       Eigen::MatrixXd _x_sum;
       Eigen::MatrixXd _xsq_sum;
-        
-        //Eigen::Map<Eigen::VectorXd> _x_mat;
-        //Eigen::Map<Eigen::VectorXd> _m_mat;
-        //Eigen::Map<Eigen::VectorXd> _g_mat;
       
-      int _x_sum_n;
+      double _x_sum_n;
       // Next time we should adapt the per-parameter step sizes.
       int _next_diag_adapt;
+    
 
       /**
        * Determine whether we've started to make a "U-turn" at either end
@@ -69,14 +66,18 @@ namespace stan {
        *
        * @return false if we've made a U-turn, true otherwise.
        */
-      inline static bool compute_criterion(std::vector<double>& xplus,
+      inline bool compute_criterion(std::vector<double>& xplus,
                                            std::vector<double>& xminus,
                                            std::vector<double>& mplus,
                                            std::vector<double>& mminus) {
         std::vector<double> total_direction;
         stan::math::sub(xplus, xminus, total_direction);
-        return stan::math::dot(total_direction, mminus) > 0
-          && stan::math::dot(total_direction, mplus) > 0;
+        Eigen::Map<Eigen::VectorXd> total_direction_mat(&total_direction[0],total_direction.size());
+        Eigen::Map<Eigen::VectorXd> mplus_mat(&mplus[0],mplus.size());
+        Eigen::Map<Eigen::VectorXd> mminus_mat(&mminus[0],mminus.size());
+        _cov_L.triangularView<Eigen::Lower>().solveInPlace(total_direction_mat);
+        return total_direction_mat.dot(mplus_mat) > 0
+          && total_direction_mat.dot(mminus_mat) > 0;
       }
 
     public:
@@ -131,8 +132,8 @@ namespace stan {
           _maxdepth(maxdepth),
           _lastdepth(-1),
           _x_sum_n(0),
-          _next_diag_adapt(20 + model.num_params_r())
-          //_drop_warm(10)
+          _next_diag_adapt(10 + model.num_params_r()),
+          _drop_warm(10)
           //_x_mat(&(this->_x[0]), (this->_x).size())
       {
         // start at 10 * epsilon because NUTS cheaper for larger epsilon
@@ -218,6 +219,16 @@ namespace stan {
             this->_g = newgrad;
             this->_logp = newlogp;
           }
+            if (this->_n_adapt_steps > _drop_warm) {
+                _x_sum_n++;
+                
+                for (size_t i = 0; i < newx.size(); i++) {
+                    _x_sum(i) += this->_x[i];
+                    for (size_t j = 0; j < newx.size(); j++){
+                        _xsq_sum(i,j) += this->_x[i] * this->_x[j];
+                    }
+                }
+            }  
           nvalid += newnvalid;
           ++depth;
         }
@@ -233,15 +244,7 @@ namespace stan {
           std::vector<double> result;
           this->_da.update(gvec, result);
           this->_epsilon = exp(result[0]);
-          // step_sizes. Doesn't happen every step.
-            /*std::cout <<"new"<< this->_x[0] << std::endl;
-            for (size_t i2 = 0; i2 < this->_x.size(); i2++) {
-                _x_sum(i2) += (this->_x)[i2];
-                for (size_t j2 = 0; j2 < this->_x.size(); j2++){
-                    _xsq_sum(i2,j2) += (this->_x)[i2] * (this->_x)[j2];
-                }
-            }*/
-
+ 
           if (this->_n_adapt_steps == _next_diag_adapt) {
             _next_diag_adapt *= 2;
             //double step_size_sq_sum = 0;
@@ -250,17 +253,17 @@ namespace stan {
                 _xsq_sum = _xsq_sum / _x_sum_n;  //Yuanjun : change summation to expectation
                 _cov_mat = _xsq_sum - _x_sum * _x_sum.transpose();
                 //Yuanjun : Do the shrinkage
-                double _norm = _cov_mat.trace() / _cov_mat.rows();
+              double _norm = _cov_mat.trace() / _cov_mat.rows();
                 if(_norm == 0)
                     _cov_mat = Eigen::MatrixXd::Identity(_cov_mat.rows(),_cov_mat.cols());
                 else{
-                    _cov_mat = _cov_mat * ((1 - 1 / _x_sum_n) / _norm);
-                    _cov_mat.diagonal() = _cov_mat.diagonal() / (1 - 1 / _x_sum_n);
+                    _cov_mat = _cov_mat * ((1 - 5 / _x_sum_n) / _norm);
+                    _cov_mat.diagonal() = _cov_mat.diagonal() / (1 - 5 / _x_sum_n);
                 }
                 _cov_L = _cov_mat.selfadjointView<Eigen::Upper>().llt().matrixL();
-                _x_sum *= 0;
-                _xsq_sum *= 0;
-                _x_sum_n = 0;
+                _x_sum *= 0.8;
+                _xsq_sum *= 0.8;
+                _x_sum_n *= 0.8;
                                       }
         }
         std::vector<double> result;
@@ -390,7 +393,7 @@ namespace stan {
           n_considered = 1;
           this->nfevals_plus_eq(1);
           // Update running statistics if point is in slice
-          if (nvalid){ //& this->_n_adapt_steps > _drop_warm) {
+          /*if (nvalid & this->_n_adapt_steps > _drop_warm) {
             _x_sum_n++;
             
             for (size_t i = 0; i < newx.size(); i++) {
@@ -399,7 +402,7 @@ namespace stan {
                 _xsq_sum(i,j) += newx[i] * newx[j];
                 }
             }
-          }
+          }*/
         } else {            // depth >= 1
           build_tree(x, m, grad, u, direction, depth-1, H0, xminus, mminus,
                      gradminus, xplus, mplus, gradplus, newx, newgrad, newlogp,
